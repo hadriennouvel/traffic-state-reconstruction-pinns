@@ -1,0 +1,33 @@
+{
+  "regime": "ss",
+  "seed": 104827,
+  "mean_density": 0.4,
+  "L": 6.282079999999996,
+  "Tmax": 40.0,
+  "settle": 5.0,
+  "deltaT": 0.016666666666666666,
+  "deltaX": 0.05,
+  "cell_width": 0.049857777777777744,
+  "sigma": 0.01,
+  "tau": 0.06,
+  "Vff": 0.8334000000000001,
+  "v_observed_max": 0.7394113993267596,
+  "veh_length": 0.0075,
+  "penetration": 0.020895522388059702,
+  "n_vehicles": 335,
+  "n_probes": 7,
+  "bottleneck_edge": null,
+  "bottleneck_mps": null,
+  "simulation_seed": 104827,
+  "probe_seed": 209659,
+  "probe_placement_index": 0,
+  "master_probe_ids": [
+    151,
+    178,
+    190,
+    241,
+    320,
+    329,
+    333
+  ]
+}
