@@ -56,7 +56,7 @@ def main():
     args = p.parse_args()
 
     if not args.periodic:
-        raise ValueError("ARZ_3 stage 1 is permanently configured for the periodic ring")
+        raise ValueError("ARZ stage 1 is permanently configured for the periodic ring")
     data = RingData(args.data, unwrap=True)
     t_m, x_m, rho_m, v_m = data.measurements()
     print("fresh %s | init seed %d | %d probes, %d observations"

@@ -16,6 +16,7 @@ Outputs:
     spaciotemporal.csv   header [L, Tmax], then the density field (Nx rows)
     velocity.csv         the velocity field [km/min] (Nx rows)
     pv.csv               rows [x, t, rho, v, probe_id, x_unwrapped]
+    probe_vehicles.csv   local probe index to SUMO vehicle-ID mapping
     meta.json            all parameters and seeds
 
 @author: hadrien
@@ -201,10 +202,15 @@ def generate(out_dir, simulation_seed=104827, probe_seed=209659,
 
     # --- probe measurements (exact positions, interpolated density) --------
     rows = []
-    for pid, vid in enumerate(sorted(pv_rows)):
+    ordered_probes = sorted(pv_rows)
+    for pid, vid in enumerate(ordered_probes):
         for (x, t, speed, xu) in pv_rows[vid]:
             rho_meas = float(sample_field(rho_field, t, x, Tmax, L))
             rows.append((x, t, rho_meas, speed, pid, xu))
+    probe_manifest = [
+        (pid, int(vehicles.index(vid)), vid)
+        for pid, vid in enumerate(ordered_probes)
+    ]
 
     # --- write -------------------------------------------------------------
     os.makedirs(out_dir, exist_ok=True)
@@ -216,6 +222,10 @@ def generate(out_dir, simulation_seed=104827, probe_seed=209659,
         csv.writer(f).writerows(v_field)
     with open(os.path.join(out_dir, 'pv.csv'), 'w', newline='') as f:
         csv.writer(f).writerows(rows)
+    with open(os.path.join(out_dir, 'probe_vehicles.csv'), 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(('probe_index', 'selection_index', 'sumo_vehicle_id'))
+        writer.writerows(probe_manifest)
     with open(os.path.join(out_dir, 'meta.json'), 'w') as f:
         json.dump(dict(regime='ss', seed=simulation_seed,
                        simulation_seed=simulation_seed, probe_seed=probe_seed,
@@ -230,7 +240,10 @@ def generate(out_dir, simulation_seed=104827, probe_seed=209659,
                        v_observed_max=float(v_field.max()),
                        veh_length=veh_length, penetration=penetration,
                        n_vehicles=n_cars, n_probes=n_pv,
+                       # Legacy name retained for compatibility: these are
+                       # indices in the sorted SUMO vehicle list.
                        master_probe_ids=list(map(int, selected_indices)),
+                       sumo_probe_vehicle_ids=ordered_probes,
                        bottleneck_edge=None, bottleneck_mps=None),
                   f, indent=2)
 

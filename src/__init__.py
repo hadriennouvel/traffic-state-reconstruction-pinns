@@ -1,1 +1,1 @@
-"""Minimal reproducible implementation of the LWR and ARZ_3 PINNs."""
+"""Minimal reproducible implementation of the LWR and ARZ PINNs."""

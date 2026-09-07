@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Train one joint ARZ_3 seed and write a self-contained result folder."""
+"""Train one nested ARZ seed with the validated five-loss objective."""
 
 from __future__ import annotations
 
@@ -49,21 +49,9 @@ def main():
     p.add_argument("--data-batch", type=int, default=4096)
     p.add_argument("--resample", type=int, default=25)
     p.add_argument("--tau", type=float, default=0.03)
-    p.add_argument("--velocity-weight", type=float, default=10.0)
-    p.add_argument("--flux-weight", type=float, default=1.0,
-                   help="weight of weak probe-density x trajectory-speed consistency")
-    p.add_argument("--induced-velocity-weight", type=float, default=0.25,
-                   help="weight coupling density errors to their LWR-induced speeds")
-    p.add_argument("--trajectory-velocity-weight", type=float, default=5.0,
-                   help="weight of the weak dx/dt integral velocity observation")
-    p.add_argument("--micro-huber-delta", type=float, default=1.5,
-                   help="Huber transition in standardized microscopic-speed residual units")
+    p.add_argument("--velocity-weight", type=float, default=1.0)
     p.add_argument("--micro-coupling-max", type=float, default=0.25,
                    help="maximum raw-speed gradient entering the shared density encoder")
-    p.add_argument("--trajectory-window-seconds", type=float, default=10.0,
-                   help="probe displacement interval used by the kinematic loss")
-    p.add_argument("--trajectory-quadrature", type=int, default=5,
-                   help="odd number of observed path samples used in the velocity integral")
     p.add_argument("--coupling-start", type=int, default=500,
                    help="first epoch at which velocity gradients enter the shared density features")
     p.add_argument("--coupling-ramp", type=int, default=250,
@@ -74,7 +62,7 @@ def main():
                    help="weak stage-1 prior; Veq remains trainable")
     p.add_argument("--rho-correction-input",
                    choices=("lwr-jet",), default="lwr-jet",
-                   help="permanent ARZ_3 correction input: physical LWR state jet")
+                   help="permanent ARZ correction input: physical LWR state jet")
     p.add_argument("--rho-base-filter", choices=("none", "gaussian"),
                    default="none",
                    help="optional periodic spatial smoothing of rho1 before correction")
@@ -95,18 +83,15 @@ def main():
                    help="epochs between adaptive penalty updates after warmup")
     p.add_argument("--dual-cap", type=float, default=1.0,
                    help="common upper bound for adaptive conservation penalties")
-    p.add_argument("--target-tolerances", type=float, nargs=4,
-                   default=(0.50, 0.10, 0.10, 0.004),
-                   metavar=("MASS", "MOM", "GLOBAL", "CORRIDOR"),
-                   help="normalized loss targets for target penalty mode")
-    p.add_argument("--target-rates", type=float, nargs=4,
-                   default=(0.0025, 0.0025, 0.0025, 0.0025),
-                   metavar=("MASS", "MOM", "GLOBAL", "CORRIDOR"),
-                   help="independent controller rates for target penalty mode")
-    p.add_argument("--target-caps", type=float, nargs=4,
-                   default=(0.50, 0.50, 0.50, 0.25),
-                   metavar=("MASS", "MOM", "GLOBAL", "CORRIDOR"),
-                   help="independent lambda caps for target penalty mode")
+    p.add_argument("--target-tolerances", type=float, nargs=2,
+                   default=(0.50, 0.10), metavar=("MASS", "MOM"),
+                   help="normalized weak mass and momentum targets")
+    p.add_argument("--target-rates", type=float, nargs=2,
+                   default=(0.0025, 0.0025), metavar=("MASS", "MOM"),
+                   help="independent target-controller rates")
+    p.add_argument("--target-caps", type=float, nargs=2,
+                   default=(0.50, 0.50), metavar=("MASS", "MOM"),
+                   help="independent weak-physics lambda caps")
     p.add_argument("--target-stop", type=int, default=1000,
                    help="exclusive epoch at which target updates freeze")
     p.add_argument("--warmup", type=int, default=500)
@@ -133,13 +118,7 @@ def main():
     model = ARZ3(baseline, data, seed=a.seed, n_cv=a.n_cv,
                  data_batch=a.data_batch, bottleneck_mask_km=a.bottleneck_mask_km,
                  tau=a.tau, velocity_weight=a.velocity_weight,
-                 flux_weight=a.flux_weight,
-                 induced_velocity_weight=a.induced_velocity_weight,
-                 trajectory_velocity_weight=a.trajectory_velocity_weight,
-                 micro_huber_delta=a.micro_huber_delta,
                  micro_coupling_max=a.micro_coupling_max,
-                 trajectory_window_seconds=a.trajectory_window_seconds,
-                 trajectory_quadrature=a.trajectory_quadrature,
                  coupling_start=a.coupling_start,
                  coupling_ramp=a.coupling_ramp,
                  veq_init_steps=a.veq_init_steps,
@@ -156,16 +135,15 @@ def main():
                  target_stop=a.target_stop)
 
     nesting = model.nesting_error()
-    print("ARZ_3 seed %d | %d probes, %d observations | velocity=%s | rho correction=%s base=%s | penalty=%s"
+    print("ARZ seed %d | %d probes, %d observations | velocity=%s | rho correction=%s base=%s | penalty=%s"
           % (a.seed, len(tm), sum(map(len, tm)), data.velocity_observation,
              a.rho_correction_input, a.rho_base_filter, a.penalty_mode))
     print("exact state nesting rho %.3e velocity %.3e | Veq prior RMSE %.3e | scales %.3e %.3e"
           % (nesting["rho_max_abs"], nesting["velocity_max_abs"],
              nesting["veq_rmse_to_baseline"],
              float(model.mass_scale), float(model.mom_scale)))
-    print("trajectory dx/dt window %.1fs (%d points) | microscopic coupling cap %.2f"
-          % (model.trajectory_effective_seconds,
-             model.trajectory_quadrature, model.micro_coupling_max))
+    print("five-term objective %s | microscopic coupling cap %.2f"
+          % (", ".join(model.objective_terms), model.micro_coupling_max))
 
     if a.eval_every < 0:
         raise ValueError("--eval-every cannot be negative")
@@ -179,7 +157,7 @@ def main():
             a.data,
             make_arz3_predictor(model),
             chunk=a.eval_chunk,
-            label="ARZ-3",
+            label="ARZ",
         )
 
     started = time.time()
@@ -205,7 +183,7 @@ def main():
         "invalid_density_fraction": float(np.mean((rho_hat < 0) | (rho_hat > 1))),
     })
     result = {
-        "model": "ARZ_3",
+        "model": "ARZ",
         "seed": a.seed,
         "runtime_seconds": runtime,
         "optimization_runtime_excluding_evaluation_seconds": (
@@ -220,6 +198,7 @@ def main():
             }),
         "corrected_grid": corrected,
         "fresh_physics": audit,
+        "training_objective": model.objective_audit(),
         "penalties": model.penalty_audit(),
         "architecture": model.architecture_config(),
         "constitutive": constitutive,
@@ -258,9 +237,9 @@ def main():
 
         ext = [data.t[0], data.t[-1], 0, data.L]
         fig, ax = plt.subplots(2, 3, figsize=(16, 8))
-        fields = [(data.rho, "density truth"), (rho_hat, "ARZ_3 density"),
+        fields = [(data.rho, "density truth"), (rho_hat, "ARZ density"),
                   (np.abs(rho_hat - data.rho), "absolute density error"),
-                  (data.velocity, "velocity truth"), (v_hat, "ARZ_3 velocity"),
+                  (data.velocity, "velocity truth"), (v_hat, "ARZ velocity"),
                   (np.abs(v_hat - data.velocity), "absolute velocity error")]
         for A, (field, title) in zip(ax.ravel(), fields):
             im = A.imshow(field.T, origin="lower", aspect="auto", extent=ext,
@@ -275,9 +254,7 @@ def main():
 
         fig, ax = plt.subplots(1, 2, figsize=(12, 4))
         ep = h["epoch"]
-        for key in ("rho", "v", "trajectory_velocity", "flux",
-                    "induced_velocity", "weak_mass",
-                    "weak_mom", "global_mass", "corridor", "veq_prior"):
+        for key in model.objective_terms:
             ax[0].semilogy(ep, np.maximum(h[key], 1e-12), label=key)
         if reconstruction_monitor:
             reconstruction = reconstruction_monitor.arrays()

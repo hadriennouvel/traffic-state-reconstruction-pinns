@@ -1,4 +1,4 @@
-"""Restore the fresh LWR stage used as the nested ARZ_3 baseline."""
+"""Restore the fresh LWR stage used as the nested ARZ baseline."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ def load_baseline(run_dir, t_m, x_m, rho_m, v_m, length, duration):
         config = json.load(stream)["config"]
     model_kind = config.get("config")
     if model_kind != "soft-physics":
-        raise ValueError("ARZ_3 baseline must be a recorded soft-physics LWR run")
+        raise ValueError("ARZ baseline must be a recorded soft-physics LWR run")
     # Recreate the complete training object graph, including the per-probe
-    # nuisance offsets.  Those offsets are not used by ARZ_3 inference, but an
+    # nuisance offsets.  Those offsets are not used by ARZ inference, but an
     # exact graph prevents TensorFlow's partial-checkpoint restore from hiding
     # a mismatched baseline configuration.
     weights = dict(rho=1.0, v=1.0, traj=1.0, rho_traj=0.0, v2=0.0,

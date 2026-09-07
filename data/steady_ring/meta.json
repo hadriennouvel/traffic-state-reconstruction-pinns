@@ -29,5 +29,14 @@
     320,
     329,
     333
+  ],
+  "sumo_probe_vehicle_ids": [
+    "veh.234",
+    "veh.259",
+    "veh.27",
+    "veh.315",
+    "veh.86",
+    "veh.94",
+    "veh.98"
   ]
 }

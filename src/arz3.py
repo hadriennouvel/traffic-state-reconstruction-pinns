@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Joint density/velocity ARZ correction with monotone constitutive physics."""
+"""Nested ARZ reconstruction with the validated five-term objective.
+
+The frozen LWR state is corrected by a shared density/velocity architecture.
+Only the five losses retained by the ablation study are implemented here:
+probe density, microscopic probe speed, the equilibrium-law prior, weak mass
+conservation, and weak ARZ momentum conservation.
+"""
 
 from __future__ import annotations
 
@@ -185,33 +191,30 @@ class MonotoneEquilibriumSpeed(tf.Module):
 
 
 class ARZ3(tf.Module):
-    """Joint ARZ correction that is physical by construction where practical.
+    """Joint ARZ correction using the ablation-selected objective.
 
     * rho and v are bounded through logit residuals;
     * V_eq is a learnable, bounded decreasing network and p=Vmax-V_eq is
       increasing by construction;
     * conservation is enforced over spacetime control volumes, not through
       pointwise derivatives at shocks;
-    * every loss is nondimensionalized by a fixed data/initial residual scale.
+    * all five losses are nondimensionalized by fixed data/initial scales.
     """
+
+    objective_terms = ("rho", "v", "veq_prior", "weak_mass", "weak_mom")
 
     def __init__(self, baseline, data, seed=0, n_cv=512, data_batch=4096,
                  cv_dt=0.06, cv_dx=0.06, bottleneck_mask_km=0.18,
-                 tau=0.03, n_corr_t=20, n_corr_s=16, velocity_weight=10.0,
+                 tau=0.03, velocity_weight=1.0,
                  veq_init_steps=1000, veq_prior_weight=0.02,
                  rho_correction_input="lwr-jet", rho_base_filter="none",
                  rho_smoothing_sigma_km=0.05, vmax_source="metadata",
                  veq_jam_zero=True, penalty_mode="target",
                  dual_rate=0.02, dual_every=25, dual_cap=1.0,
-                 target_tolerances=(0.50, 0.10, 0.10, 0.004),
-                 target_rates=(0.0025, 0.0025, 0.0025, 0.0025),
-                 target_caps=(0.50, 0.50, 0.50, 0.25),
-                 target_stop=1000, flux_weight=1.0,
-                 induced_velocity_weight=0.25,
-                 trajectory_velocity_weight=5.0,
-                 micro_huber_delta=1.5, micro_coupling_max=0.25,
-                 trajectory_window_seconds=10.0,
-                 trajectory_quadrature=5,
+                 target_tolerances=(0.50, 0.10),
+                 target_rates=(0.0025, 0.0025),
+                 target_caps=(0.50, 0.50),
+                 target_stop=1000, micro_coupling_max=0.25,
                  coupling_start=500, coupling_ramp=250):
         super().__init__(name="arz3")
         tf.random.set_seed(seed)
@@ -223,7 +226,6 @@ class ARZ3(tf.Module):
         self.periodic = True
         self.tau = float(tau)
         self.tau_hat = tf.constant(2.0 * tau / self.Tmax, DTYPE)
-        self.rho_bar = tf.constant(float(data.meta["mean_density"]), DTYPE)
         self.data_batch = min(int(data_batch), sum(map(len, data.t_m)))
         self.n_cv = int(n_cv)
         self.cv_dt, self.cv_dx = float(cv_dt), float(cv_dx)
@@ -231,31 +233,18 @@ class ARZ3(tf.Module):
                         if data.meta.get("bottleneck_edge") else 0.0)
         self.velocity_weight = float(velocity_weight)
         self.veq_prior_weight = float(veq_prior_weight)
-        self.flux_weight = float(flux_weight)
-        self.induced_velocity_weight = float(induced_velocity_weight)
-        self.trajectory_velocity_weight = float(trajectory_velocity_weight)
-        self.micro_huber_delta = float(micro_huber_delta)
         self.micro_coupling_max = float(micro_coupling_max)
-        self.trajectory_window_seconds = float(trajectory_window_seconds)
-        self.trajectory_quadrature = int(trajectory_quadrature)
         self.coupling_start = int(coupling_start)
         self.coupling_ramp = int(coupling_ramp)
-        if (self.flux_weight < 0 or self.induced_velocity_weight < 0
-                or self.trajectory_velocity_weight < 0):
-            raise ValueError("consistency-loss weights must be non-negative")
-        if self.micro_huber_delta <= 0:
-            raise ValueError("micro_huber_delta must be positive")
+        if self.velocity_weight < 0 or self.veq_prior_weight < 0:
+            raise ValueError("fixed loss weights must be non-negative")
         if not 0.0 <= self.micro_coupling_max <= 1.0:
             raise ValueError("micro_coupling_max must lie in [0, 1]")
-        if self.trajectory_window_seconds <= 0:
-            raise ValueError("trajectory_window_seconds must be positive")
-        if self.trajectory_quadrature < 3 or self.trajectory_quadrature % 2 == 0:
-            raise ValueError("trajectory_quadrature must be an odd integer >= 3")
         if self.coupling_start < 0 or self.coupling_ramp <= 0:
             raise ValueError("coupling_start must be non-negative and coupling_ramp positive")
         if data.velocity_observation != "probe-speedometer":
             raise ValueError(
-                "ARZ_3 requires microscopic probe speeds from "
+                "ARZ requires microscopic probe speeds from "
                 "pv.csv; velocity.csv is evaluation-only")
         # The target-tracking physics controller can increase or decrease
         # penalty coefficients during optimization.
@@ -264,18 +253,11 @@ class ARZ3(tf.Module):
         self.penalty_weights = {
             "rho": 1.0,
             "v": self.velocity_weight,
-            "flux": self.flux_weight,
-            "induced_velocity": self.induced_velocity_weight,
-            "trajectory_velocity": self.trajectory_velocity_weight,
             "weak_mass": 0.20,
             "weak_mom": 0.20,
-            "global_mass": 0.20,
-            "corridor": 0.10,
             "veq_prior": self.veq_prior_weight,
-            "trust": 1e-3,
         }
-        self.physics_penalty_keys = (
-            "weak_mass", "weak_mom", "global_mass", "corridor")
+        self.physics_penalty_keys = ("weak_mass", "weak_mom")
         self.penalty_mode = str(penalty_mode).lower()
         if self.penalty_mode not in ("scheduled", "adaptive", "target"):
             raise ValueError(
@@ -295,7 +277,7 @@ class ARZ3(tf.Module):
                           for key in self.physics_penalty_keys}
             else:
                 if len(values) != len(self.physics_penalty_keys):
-                    raise ValueError("%s must contain mass, momentum, global, and corridor values" % name)
+                    raise ValueError("%s must contain mass and momentum values" % name)
                 result = dict(zip(self.physics_penalty_keys, map(float, values)))
             if positive and any(value <= 0 for value in result.values()):
                 raise ValueError("%s values must be positive" % name)
@@ -321,7 +303,7 @@ class ARZ3(tf.Module):
         }
         self.rho_correction_input = str(rho_correction_input).lower()
         if self.rho_correction_input != "lwr-jet":
-            raise ValueError("ARZ_3 permanently requires rho_correction_input='lwr-jet'")
+            raise ValueError("ARZ permanently requires rho_correction_input='lwr-jet'")
         self.rho_base_filter = str(rho_base_filter).lower()
         if self.rho_base_filter not in ("none", "gaussian"):
             raise ValueError("rho_base_filter must be 'none' or 'gaussian'")
@@ -345,8 +327,6 @@ class ARZ3(tf.Module):
                                    DTYPE)
         self.v_var = tf.constant(
             max(float(np.var(np.concatenate(vel) * self.v_scale)), 1e-3), DTYPE)
-        self._setup_trajectory_kinematics(t, x, rho)
-
         # The LWR jet has heterogeneous physical units.  Calibrate a fixed
         # affine normalization on both observations and a uniform spacetime
         # grid.  It is deliberately not trainable: the three inputs retain a
@@ -358,7 +338,7 @@ class ARZ3(tf.Module):
         if self.rho_correction_input == "lwr-jet":
             self._calibrate_rho_jet()
 
-        # ARZ_3 preserves exact residual nesting over the frozen LWR solution,
+        # ARZ preserves exact residual nesting over the frozen LWR solution,
         # while both output heads use a shared traffic representation.  The encoder receives periodic
         # coordinates, the normalized physical LWR jet, and baseline speed.
         # Velocity additionally receives corrected density and its shift from
@@ -403,100 +383,18 @@ class ARZ3(tf.Module):
         self.quad_w = tf.constant((w / 2.0).reshape(1, -1), DTYPE)
         self.resample_volumes()
 
-        self._setup_corridors(t, x, n_corr_t, n_corr_s)
         self.mass_scale, self.mom_scale = self._initial_physics_scales()
         self.history = {k: [] for k in (
-            "epoch", "total", "rho", "v", "flux", "induced_velocity",
-            "trajectory_velocity",
-            "weak_mass", "weak_mom",
-            "global_mass", "corridor", "veq_prior", "trust", "physics_factor",
+            "epoch", "total", "rho", "v", "veq_prior",
+            "weak_mass", "weak_mom", "physics_factor",
             "coupling_strength", "micro_coupling_strength",
             "true_mse", "true_mse_band", "true_ge_integral",
-            "lambda_rho", "lambda_v", "lambda_flux",
-            "lambda_induced_velocity", "lambda_trajectory_velocity",
-            "lambda_weak_mass", "lambda_weak_mom",
-            "lambda_global_mass", "lambda_corridor", "lambda_veq_prior",
-            "lambda_trust")}
+            "lambda_rho", "lambda_v", "lambda_veq_prior",
+            "lambda_weak_mass", "lambda_weak_mom")}
 
     def _input(self, t, x):
         angle = np.pi * x
         return tf.concat([t, tf.cos(angle), tf.sin(angle)], axis=1)
-
-    def _setup_trajectory_kinematics(self, t_blocks, x_blocks, rho_blocks):
-        """Build weak velocity observations from the measured trajectories.
-
-        The raw speedometer samples remain the pointwise velocity data.  This
-        second, lower-noise constraint uses only probe positions and the
-        kinematic identity dx/dt=v: displacement over a short interval must
-        equal the integral of the reconstructed velocity along that observed
-        trajectory.  No value from velocity.csv enters these tensors.
-        """
-        time_steps = [np.median(np.diff(values)) for values in t_blocks
-                      if len(values) > 1]
-        if not time_steps:
-            raise ValueError("trajectory kinematics require at least two samples")
-        dt = float(np.median(time_steps))
-        requested = self.trajectory_window_seconds / 60.0
-        span = max(self.trajectory_quadrature - 1,
-                   int(round(requested / dt)))
-        # An even span places one observed sample at the interval midpoint.
-        span += span % 2
-        offsets = np.rint(np.linspace(
-            0, span, self.trajectory_quadrature)).astype(np.int32)
-        if len(np.unique(offsets)) != self.trajectory_quadrature:
-            raise ValueError("trajectory window is too short for its quadrature")
-
-        # Trapezoidal weights for the possibly rounded, nonuniform offsets.
-        nodes = offsets.astype(np.float64)
-        weights = np.empty(len(nodes), dtype=np.float64)
-        weights[0] = 0.5 * (nodes[1] - nodes[0])
-        weights[-1] = 0.5 * (nodes[-1] - nodes[-2])
-        weights[1:-1] = 0.5 * (nodes[2:] - nodes[:-2])
-        weights /= nodes[-1] - nodes[0]
-
-        kin_t, kin_x, kin_rho, kin_v = [], [], [], []
-        for times, positions, densities in zip(
-                t_blocks, x_blocks, rho_blocks):
-            times = np.asarray(times)
-            positions = np.asarray(positions)
-            densities = np.asarray(densities)
-            if len(times) <= span:
-                continue
-            start = np.arange(len(times) - span, dtype=np.int32)
-            index = start[:, None] + offsets[None, :]
-            duration = times[start + span] - times[start]
-            valid = duration > 0
-            index = index[valid]
-            start = start[valid]
-            duration = duration[valid]
-            kin_t.append(2.0 * times[index] / self.Tmax - 1.0)
-            kin_x.append(2.0 * positions[index] / self.L - 1.0)
-            midpoint = start + span // 2
-            kin_rho.append(densities[midpoint])
-            kin_v.append((positions[start + span] - positions[start])
-                         / duration)
-        if not kin_t:
-            raise ValueError("no complete trajectory windows were available")
-
-        t_values = np.concatenate(kin_t).astype(np.float32)
-        x_values = np.concatenate(kin_x).astype(np.float32)
-        rho_values = np.concatenate(kin_rho).astype(np.float32)
-        velocity_values = np.concatenate(kin_v).astype(np.float32)
-        self.KT = tf.constant(t_values, DTYPE)
-        self.KX = tf.constant(x_values, DTYPE)
-        self.KR = _tensor(rho_values)
-        self.KV = _tensor(velocity_values * self.v_scale)
-        self.kinematic_weights = tf.constant(
-            weights.reshape(1, -1), DTYPE)
-        self.n_kinematic = len(velocity_values)
-        self.trajectory_batch = min(max(256, self.data_batch // 2),
-                                    self.n_kinematic)
-        self.kinematic_v_var = tf.constant(max(float(np.var(
-            velocity_values * self.v_scale)), 1e-3), DTYPE)
-        self.kinematic_q_var = tf.constant(max(float(np.var(
-            rho_values * velocity_values * self.v_scale)), 1e-4), DTYPE)
-        self.trajectory_span_steps = int(span)
-        self.trajectory_effective_seconds = float(span * dt * 60.0)
 
     def _calibrate_rho_jet(self):
         """Fit deterministic input scales without consuming model RNG state."""
@@ -666,47 +564,6 @@ class ARZ3(tf.Module):
         momentum = self.tau_hat * dy - self.cv_dt * source_mean
         return mass, momentum
 
-    def _setup_corridors(self, t, x, n_t, n_s):
-        tref = max(z.min() for z in t)
-        tg = np.linspace(2.0 * tref / self.Tmax - 1.0, 1.0, n_t)
-        th = [2.0 * z / self.Tmax - 1.0 for z in t]
-        xh = [2.0 * z / self.L - 1.0 for z in x]
-        positions = np.column_stack([np.interp(tg, th[i], xh[i])
-                                     for i in range(len(t))])
-        pos0 = positions[0]
-        order = np.argsort(pos0 % 2.0)
-        pairs, offsets = [], []
-        for a, b in zip(order, np.roll(order, -1)):
-            d = pos0[b] - pos0[a]
-            pairs.append((int(a), int(b)))
-            offsets.append(2.0 * np.floor(d / 2.0))
-        self.corr_x = tf.constant(positions, DTYPE)
-        self.corr_t = tf.constant(tg.reshape(-1, 1), DTYPE)
-        self.corr_s = tf.constant(((np.arange(n_s) + 0.5) / n_s).reshape(1, -1), DTYPE)
-        self.corr_pairs = pairs
-        self.corr_offsets = tf.constant(np.asarray(offsets).reshape(-1, 1), DTYPE)
-
-    def corridor_loss(self):
-        a = tf.stack([self.corr_x[:, i] for i, _ in self.corr_pairs], axis=0)
-        b = tf.stack([self.corr_x[:, j] for _, j in self.corr_pairs], axis=0)
-        gap = b - a - self.corr_offsets
-        xq = a[:, :, None] + gap[:, :, None] * self.corr_s[None, :, :]
-        tq = tf.broadcast_to(self.corr_t[None, :, :], tf.shape(xq))
-        r = self.rho(tf.reshape(tq, [-1, 1]), tf.reshape(xq, [-1, 1]))
-        counts = gap * tf.reduce_mean(tf.reshape(r, tf.shape(xq)), axis=-1)
-        return tf.reduce_mean(tf.math.reduce_variance(counts, axis=1)
-                              / tf.maximum(tf.square(tf.reduce_mean(counts, axis=1)), 1e-6))
-
-    def global_mass_loss(self):
-        # Deterministic periodic midpoint grid; no duplicated endpoint.
-        tt = tf.reshape(tf.linspace(-0.95, 0.95, 10), (-1, 1))
-        xx = tf.reshape(-1.0 + (tf.range(64, dtype=DTYPE) + 0.5) * (2.0 / 64), (1, -1))
-        T = tf.broadcast_to(tt, (10, 64))
-        X = tf.broadcast_to(xx, (10, 64))
-        r = tf.reshape(self.rho(tf.reshape(T, [-1, 1]), tf.reshape(X, [-1, 1])), (10, 64))
-        # A two-percentage-point error should cost O(1).
-        return tf.reduce_mean(tf.square((tf.reduce_mean(r, axis=1) - self.rho_bar) / 0.02))
-
     def _initial_physics_scales(self):
         mass, mom = self.weak_residuals()
         sm = max(float(tf.sqrt(tf.reduce_mean(tf.square(mass))).numpy()), 1e-3)
@@ -714,6 +571,7 @@ class ARZ3(tf.Module):
         return tf.constant(sm, DTYPE), tf.constant(sw, DTYPE)
 
     def losses(self, physics_factor=1.0):
+        """Compute exactly the five losses retained by the ablation study."""
         idx = tf.random.uniform((self.data_batch,), 0, self.n_data, dtype=tf.int32)
         t, x = tf.gather(self.T, idx), tf.gather(self.X, idx)
         # The raw point speed is an instantaneous microscopic observable.  It
@@ -725,65 +583,16 @@ class ARZ3(tf.Module):
         observed_rho = tf.gather(self.R, idx)
         observed_v = tf.gather(self.V, idx)
         lrho = tf.reduce_mean(tf.square(r - observed_rho)) / self.rho_var
-        standardized_v_error = ((v - observed_v)
-                                / tf.sqrt(self.v_var))
-        abs_v_error = tf.abs(standardized_v_error)
-        delta = tf.cast(self.micro_huber_delta, DTYPE)
-        # Twice the conventional Huber value preserves the normalized-MSE
-        # scale in its quadratic region while limiting microscopic outliers.
-        lv = tf.reduce_mean(tf.where(
-            abs_v_error <= delta,
-            tf.square(standardized_v_error),
-            2.0 * delta * abs_v_error - tf.square(delta)))
+        lv = tf.reduce_mean(tf.square(v - observed_v)) / self.v_var
 
-        # Lower-noise velocity information from dx/dt=v in weak integral
-        # form.  These tensors contain only observed probe trajectories.
-        kidx = tf.random.uniform((self.trajectory_batch,), 0,
-                                 self.n_kinematic, dtype=tf.int32)
-        kt = tf.gather(self.KT, kidx)
-        kx = tf.gather(self.KX, kidx)
-        kr_path, kv_path, _, _ = self._joint_state(
-            tf.reshape(kt, (-1, 1)), tf.reshape(kx, (-1, 1)),
-            self.coupling_strength)
-        kr_path = tf.reshape(
-            kr_path, (self.trajectory_batch, self.trajectory_quadrature))
-        kv_path = tf.reshape(
-            kv_path, (self.trajectory_batch, self.trajectory_quadrature))
-        predicted_average_v = tf.reduce_sum(
-            kv_path * self.kinematic_weights, axis=1, keepdims=True)
-        observed_average_v = tf.gather(self.KV, kidx)
-        ltrajectory = tf.reduce_mean(tf.square(
-            predicted_average_v - observed_average_v)) / self.kinematic_v_var
-
-        # A weak flow consistency target uses the same trajectory displacement
-        # and the permitted local density sample, never velocity.csv.
-        midpoint_rho = kr_path[:, self.trajectory_quadrature // 2][:, None]
-        observed_midpoint_rho = tf.gather(self.KR, kidx)
-        lflux = tf.reduce_mean(tf.square(
-            midpoint_rho * predicted_average_v
-            - observed_midpoint_rho * observed_average_v)
-        ) / self.kinematic_q_var
-        # Exact nonlinear counterpart of |dV/drho|^2-weighted density error.
-        # The frozen LWR curve supplies sensitivity but cannot move to reduce
-        # this loss.  It emphasizes density errors that induce large speeds.
-        induced_pred = self.base.v_hat(r)
-        induced_observed = tf.stop_gradient(self.base.v_hat(observed_rho))
-        linduced = tf.reduce_mean(tf.square(
-            induced_pred - induced_observed)) / self.v_var
         mass, mom = self.weak_residuals()
         lm = tf.reduce_mean(tf.square(mass / self.mass_scale))
         lw = tf.reduce_mean(tf.square(mom / self.mom_scale))
-        lg = self.global_mass_loss()
-        lc = self.corridor_loss()
         lveq = tf.reduce_mean(tf.square(
             (self.Veq(self.veq_grid) - self.veq_baseline) / self.Vmax))
-        _, _, trust_rho, trust_v = self._joint_state(self.cv_t, self.cv_x)
-        trust = (tf.reduce_mean(tf.square(trust_rho))
-                 + tf.reduce_mean(tf.square(trust_v)))
         pf = tf.cast(physics_factor, DTYPE)
         w = self.penalty_weights
-        physics_terms = {"weak_mass": lm, "weak_mom": lw,
-                         "global_mass": lg, "corridor": lc}
+        physics_terms = {"weak_mass": lm, "weak_mom": lw}
         if self.penalty_mode in ("adaptive", "target"):
             physics_total = tf.add_n([
                 self.physics_lambdas[key] * physics_terms[key]
@@ -793,16 +602,9 @@ class ARZ3(tf.Module):
                 w[key] * physics_terms[key]
                 for key in self.physics_penalty_keys])
         total = (w["rho"] * lrho + w["v"] * lv
-                 + w["flux"] * lflux
-                 + w["induced_velocity"] * linduced
-                 + w["trajectory_velocity"] * ltrajectory + physics_total
-                 + w["veq_prior"] * lveq + w["trust"] * trust)
-        return total, dict(rho=lrho, v=lv, flux=lflux,
-                           induced_velocity=linduced,
-                           trajectory_velocity=ltrajectory,
-                           weak_mass=lm, weak_mom=lw,
-                           global_mass=lg, corridor=lc, veq_prior=lveq,
-                           trust=trust)
+                 + w["veq_prior"] * lveq + physics_total)
+        return total, dict(rho=lrho, v=lv, veq_prior=lveq,
+                           weak_mass=lm, weak_mom=lw)
 
     def _update_penalties(self, terms, epoch):
         """Update non-scheduled penalties from normalized constraint losses."""
@@ -932,11 +734,10 @@ class ARZ3(tf.Module):
                 elif not isinstance(diagnostic, dict) and aligned_history_row:
                     self.history["true_mse"][-1] = float(diagnostic)
             elif epoch % log_every == 0:
-                print("epoch %5d loss %.3e rho %.2e micro-v %.2e traj-v %.2e flux %.2e weak %.2e/%.2e"
+                print("epoch %5d loss %.3e rho %.2e micro-v %.2e Veq %.2e weak %.2e/%.2e"
                       % (epoch, loss, terms["rho"], terms["v"],
-                         terms["trajectory_velocity"], terms["flux"],
-                         terms["weak_mass"], terms["weak_mom"],
-                         ))
+                         terms["veq_prior"], terms["weak_mass"],
+                         terms["weak_mom"]))
 
     def predict(self, t, x, chunk=30000):
         t = np.asarray(t).ravel()
@@ -1012,16 +813,8 @@ class ARZ3(tf.Module):
             "coupling_schedule": {
                 "start": self.coupling_start,
                 "ramp": self.coupling_ramp,
-                "full_coupling_losses": [
-                    "trajectory_velocity", "trajectory_flux", "ARZ_physics"],
+                "full_coupling_losses": ["weak_mass", "weak_mom"],
                 "microscopic_point_speed_maximum": self.micro_coupling_max,
-            },
-            "trajectory_observation": {
-                "source": "probe positions only (dx/dt integral)",
-                "requested_window_seconds": self.trajectory_window_seconds,
-                "effective_window_seconds": self.trajectory_effective_seconds,
-                "span_steps": self.trajectory_span_steps,
-                "quadrature_points": self.trajectory_quadrature,
             },
         }
         result.update({
@@ -1035,29 +828,23 @@ class ARZ3(tf.Module):
         return result
 
     def architecture_config(self):
-        """Input semantics required to interpret an ARZ_3 checkpoint safely."""
+        """Input semantics required to interpret an ARZ checkpoint safely."""
         trainable = (list(self.shared_encoder.trainable_variables)
                      + list(self.rho_head.trainable_variables)
                      + list(self.v_head.trainable_variables)
                      + list(self.veq_model.trainable_variables))
         return {
-            "schema_version": 4,
-            "model": "ARZ_3",
+            "schema_version": 5,
+            "model": "ARZ",
             "density_correction": "shared-encoder-lwr-jet-head",
             "velocity_correction": "shared-encoder-extended-wave-head",
             "shared_encoder_sizes": [7, 48, 48, 48, 32],
             "density_head_sizes": [32, 32, 1],
             "velocity_head_sizes": [34, 48, 48, 32, 1],
             "velocity_observation": "microscopic-probe-speedometer",
-            "point_velocity_loss": "standardized-huber",
-            "micro_huber_delta": self.micro_huber_delta,
-            "trajectory_velocity_loss": "weak-dxdt-integral",
-            "trajectory_velocity_weight": self.trajectory_velocity_weight,
-            "trajectory_window_seconds": self.trajectory_effective_seconds,
-            "trajectory_quadrature": self.trajectory_quadrature,
-            "flux_observation": "probe-density-times-trajectory-average-speed",
-            "flux_weight": self.flux_weight,
-            "induced_velocity_weight": self.induced_velocity_weight,
+            "point_density_loss": "variance-normalized-mse",
+            "point_velocity_loss": "variance-normalized-mse",
+            "objective_terms": list(self.objective_terms),
             "micro_coupling_max": self.micro_coupling_max,
             "coupling_start": self.coupling_start,
             "coupling_ramp": self.coupling_ramp,
@@ -1072,6 +859,21 @@ class ARZ3(tf.Module):
                 if self.veq_jam_zero
                 else "positive-weight-monotone-exponential"),
             "vmax_source": self.vmax_source,
+        }
+
+    def objective_audit(self):
+        """Machine-readable guard against reviving the discarded objective."""
+        return {
+            "objective_terms": list(self.objective_terms),
+            "number_of_terms": len(self.objective_terms),
+            "data_terms": ["rho", "v"],
+            "constitutive_terms": ["veq_prior"],
+            "physics_terms": ["weak_mass", "weak_mom"],
+            "discarded_after_ablation": [
+                "flux", "trajectory_velocity", "induced_velocity", "trust",
+                "global_mass", "corridor"],
+            "uses_microscopic_probe_speed": True,
+            "uses_held_out_full_plane_during_training": False,
         }
 
     def fresh_physics_audit(self, batches=12):
@@ -1106,9 +908,7 @@ class ARZ3(tf.Module):
                              "density_smoothing_sigma_km",
                              "equilibrium_speed", "vmax_source",
                              "velocity_observation", "point_velocity_loss",
-                             "trajectory_velocity_loss",
-                             "trajectory_window_seconds",
-                             "trajectory_quadrature", "micro_coupling_max",
+                             "objective_terms", "micro_coupling_max",
                              "shared_encoder_sizes", "density_head_sizes",
                              "velocity_head_sizes")
             mismatches = {
@@ -1117,7 +917,7 @@ class ARZ3(tf.Module):
             }
             if mismatches:
                 raise ValueError(
-                    "ARZ_3 checkpoint architecture mismatch: %s" % mismatches)
+                    "ARZ checkpoint architecture mismatch: %s" % mismatches)
         tf.train.Checkpoint(shared_encoder=self.shared_encoder,
                             rho_head=self.rho_head, v_head=self.v_head,
                             veq_model=self.veq_model).read(path).expect_partial()

@@ -1,4 +1,4 @@
-"""Fully retrain Data-driven, LWR, and ARZ_3 on the included dataset."""
+"""Fully retrain Data-driven, LWR, and five-loss ARZ on the dataset."""
 
 from __future__ import annotations
 
@@ -15,7 +15,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 
 
-def completed(path, require_history=False, require_strict_data_only=False):
+ARZ_OBJECTIVE = ["rho", "v", "veq_prior", "weak_mass", "weak_mom"]
+
+
+def completed(path, require_history=False, require_strict_data_only=False,
+              require_five_loss_arz=False):
     metrics_path = os.path.join(path, "metrics.json")
     arrays_path = os.path.join(path, "arrays.npz")
     if not os.path.isfile(metrics_path) or not os.path.isfile(arrays_path):
@@ -42,6 +46,18 @@ def completed(path, require_history=False, require_strict_data_only=False):
             and objective.get("adaptive_terms") == []
             and objective.get("physics_terms_present") == []
             and objective.get("optimized_modules") == ["density", "speed_net"]
+        ):
+            return False
+    if require_five_loss_arz:
+        try:
+            with open(metrics_path, "r", encoding="utf-8") as stream:
+                objective = json.load(stream)["training_objective"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        if not (
+            objective.get("objective_terms") == ARZ_OBJECTIVE
+            and objective.get("number_of_terms") == 5
+            and objective.get("uses_held_out_full_plane_during_training") is False
         ):
             return False
     return True
@@ -115,7 +131,8 @@ def main():
             [python, os.path.join(HERE, "train_stage1.py"), "--config",
              "soft-physics", "--outdir", lwr, "--epochs",
              str(lwr_epochs), "--lbfgs", str(lwr_lbfgs), *common])
-    if not args.reuse or not completed(arz3, require_history):
+    if not args.reuse or not completed(
+            arz3, require_history, require_five_loss_arz=True):
         command = [python, os.path.join(HERE, "train_arz3.py"), "--data",
                    os.path.abspath(args.data), "--baseline", lwr, "--outdir",
                    arz3, "--seed", str(args.seed), "--epochs", str(arz_epochs),
@@ -133,12 +150,19 @@ def main():
         "budgets": {
             "data_driven": {"adam": dd_epochs, "lbfgs": dd_lbfgs},
             "lwr": {"adam": lwr_epochs, "lbfgs": lwr_lbfgs},
-            "arz3": {"adam": arz_epochs},
+            "arz": {"adam": arz_epochs},
         },
         "data_driven_objective": {
             "terms": ["rho", "v"],
             "strictly_supervised": True,
             "physics_terms": [],
+        },
+        "arz_objective": {
+            "terms": ARZ_OBJECTIVE,
+            "number_of_terms": 5,
+            "discarded_after_ablation": [
+                "flux", "trajectory_velocity", "induced_velocity", "trust",
+                "global_mass", "corridor"],
         },
         "reconstruction_history": {
             "enabled": bool(args.eval_every),
@@ -150,7 +174,7 @@ def main():
         "timings_seconds": {
             "data_driven": timings["data_driven_seconds"],
             "lwr": timings["lwr_seconds"],
-            "arz3": timings["arz_seconds"],
+            "arz": timings["arz_seconds"],
             "training_total": timings["training_total"],
         }
     }

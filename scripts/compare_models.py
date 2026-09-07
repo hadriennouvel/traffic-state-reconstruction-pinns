@@ -1,4 +1,4 @@
-"""Score and plot one paired Data-driven/LWR/ARZ_3 reproduction."""
+"""Score and plot one paired Data-driven/LWR/ARZ reproduction."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import os
 import numpy as np
 
 MODELS = ("data_driven", "lwr", "arz3")
-LABELS = {"data_driven": "Data-driven", "lwr": "LWR", "arz3": "ARZ_3"}
+LABELS = {"data_driven": "Data-driven", "lwr": "LWR", "arz3": "ARZ"}
 COLORS = {"data_driven": "#0072B2", "lwr": "#E69F00", "arz3": "#009E73"}
 LINESTYLES = {"data_driven": "-", "lwr": "--", "arz3": "-."}
 
@@ -87,7 +87,7 @@ def plot_reconstruction_history(arrays, outdir):
         axis.spines[["top", "right"]].set_visible(False)
 
     # Stage 1 changes from Adam epochs to L-BFGS objective evaluations at this
-    # abscissa.  ARZ-3 is Adam-only in the permanent reproduction schedule.
+    # abscissa.  ARZ is Adam-only in the permanent reproduction schedule.
     for model in ("data_driven", "lwr"):
         if "lbfgs_start" not in arrays[model].files:
             continue
@@ -151,14 +151,14 @@ def main():
             "lower_is_better": True,
             "velocity": (
                 "Data-driven and LWR use their learned first-order diagram at "
-                "predicted density; ARZ_3 predicts a coupled velocity state."),
+                "predicted density; ARZ predicts a coupled velocity state."),
             "reconstruction_history": (
                 "Full-plane truth is read by an isolated evaluation callback. "
                 "The reported MSE/RMSE never enters a loss, gradient, optimizer, "
                 "early-stopping rule, or checkpoint-selection rule. During "
                 "stage-1 Adam, optimization step means epoch; after the marked "
                 "transition it means the L-BFGS objective-evaluation count added "
-                "to the Adam budget. ARZ_3 uses Adam epochs throughout."
+                "to the Adam budget. ARZ uses Adam epochs throughout."
             ),
         },
     }
@@ -222,7 +222,7 @@ def main():
             axis.plot(arrays[model]["r_grid"], arrays[model]["v_hat_curve"],
                     lw=2, label=LABELS[model])
         axis.plot(reference["veq_rho"], reference["veq_curve"], lw=2,
-                label="ARZ_3 learned Veq")
+                label="ARZ learned Veq")
         axis.set_xlabel("normalized density")
         axis.set_ylabel("speed [km/min]")
         axis.grid(alpha=.3)
@@ -249,7 +249,7 @@ def main():
         ("velocity_mse_band", "Velocity MSE, probe band"),
     )
     lines = ["# Reproduction result", "",
-             "| Metric (lower is better) | Data-driven | LWR | ARZ_3 |",
+             "| Metric (lower is better) | Data-driven | LWR | ARZ |",
              "|---|---:|---:|---:|"]
     for key, label in table_keys:
         lines.append("| %s | %.8g | %.8g | %.8g |" % (

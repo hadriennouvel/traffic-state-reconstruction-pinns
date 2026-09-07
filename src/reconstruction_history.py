@@ -37,7 +37,7 @@ def make_stage1_predictor(model):
 
 
 def make_arz3_predictor(model):
-    """Return a chunked physical-grid predictor for ARZ-3."""
+    """Return a chunked physical-grid predictor for the nested ARZ model."""
 
     def predict(t, x, chunk):
         return model.predict(t, x, chunk=chunk)

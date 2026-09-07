@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -41,7 +42,7 @@ def main():
     required_meta = {
         "regime", "simulation_seed", "probe_seed", "mean_density", "L",
         "Tmax", "deltaT", "cell_width", "Vff", "n_vehicles", "n_probes",
-        "penetration", "master_probe_ids",
+        "penetration", "master_probe_ids", "sumo_probe_vehicle_ids",
     }
     missing = sorted(required_meta - set(data.meta))
     if missing:
@@ -56,6 +57,36 @@ def main():
     expected_ids = np.arange(int(data.meta["n_probes"]))
     if not np.array_equal(probe_ids, expected_ids):
         raise AssertionError("probe ids must be contiguous from zero")
+    manifest_path = os.path.join(args.data, "probe_vehicles.csv")
+    if not os.path.isfile(manifest_path):
+        raise AssertionError("probe_vehicles.csv is required")
+    with open(manifest_path, "r", encoding="utf-8", newline="") as stream:
+        manifest = list(csv.DictReader(stream))
+    expected_columns = {"probe_index", "selection_index", "sumo_vehicle_id"}
+    if not manifest or set(manifest[0]) != expected_columns:
+        raise AssertionError("probe_vehicles.csv has an invalid header")
+    manifest_indices = np.asarray(
+        [int(row["probe_index"]) for row in manifest])
+    selection_indices = [int(row["selection_index"]) for row in manifest]
+    sumo_vehicle_ids = [row["sumo_vehicle_id"] for row in manifest]
+    if not np.array_equal(manifest_indices, expected_ids):
+        raise AssertionError("probe manifest indices do not match pv.csv")
+    if selection_indices != list(map(int, data.meta["master_probe_ids"])):
+        raise AssertionError("probe selection indices disagree with metadata")
+    if sumo_vehicle_ids != list(data.meta["sumo_probe_vehicle_ids"]):
+        raise AssertionError("SUMO probe vehicle IDs disagree with metadata")
+    reproduced_selection = np.sort(np.random.default_rng(
+        int(data.meta["probe_seed"])).choice(
+            np.arange(int(data.meta["n_vehicles"])),
+            int(data.meta["n_probes"]), replace=False)).tolist()
+    if selection_indices != reproduced_selection:
+        raise AssertionError("probe selection is not reproducible from probe_seed")
+    sorted_vehicle_ids = sorted(
+        "veh.%d" % index for index in range(int(data.meta["n_vehicles"])))
+    reproduced_vehicle_ids = [
+        sorted_vehicle_ids[index] for index in selection_indices]
+    if sumo_vehicle_ids != reproduced_vehicle_ids:
+        raise AssertionError("SUMO vehicle-ID mapping is inconsistent")
     counts = []
     displacement_errors = []
     point_displacement_errors = []
@@ -115,7 +146,8 @@ def main():
     if not np.isclose(data.rho.mean(), data.meta["mean_density"], atol=0.01):
         raise AssertionError("field mean disagrees with requested density")
 
-    files = ("meta.json", "pv.csv", "spaciotemporal.csv", "velocity.csv")
+    files = ("meta.json", "probe_vehicles.csv", "pv.csv",
+             "spaciotemporal.csv", "velocity.csv")
     report = {
         "status": "pass",
         "data_path": os.path.relpath(os.path.abspath(args.data), ROOT).replace(
@@ -125,6 +157,7 @@ def main():
         "shape_time_by_space": list(map(int, data.rho.shape)),
         "pv_shape": list(map(int, pv.shape)),
         "observations_per_probe": counts,
+        "probe_vehicles": manifest,
         "penetration_fraction": float(data.meta["penetration"]),
         "density_range": [float(data.rho.min()), float(data.rho.max())],
         "density_mean": float(data.rho.mean()),
@@ -166,6 +199,8 @@ def main():
             "sha256": pool_hash,
         }
     if args.output:
+        output_dir = os.path.dirname(os.path.abspath(args.output))
+        os.makedirs(output_dir, exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as stream:
             json.dump(report, stream, indent=2)
     print(json.dumps(report, indent=2))

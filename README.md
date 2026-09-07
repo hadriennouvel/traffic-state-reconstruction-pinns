@@ -6,17 +6,17 @@ estimators trained and evaluated on the same periodic SUMO realization:
 
 1. a strictly supervised **Data-driven** baseline;
 2. a first-order **LWR physics-informed neural network**;
-3. the nested second-order **ARZ-3 residual PINN**.
+3. the nested second-order **ARZ residual PINN**.
 
 The repository is intentionally compact: it contains one complete ring-road
 dataset, the code required to train and compare the three models, and no
 pretrained weights or generated results.
 
 <p align="center">
-  <img src="docs/architecture.png" alt="Nested LWR and ARZ-3 computational architecture" width="100%">
+  <img src="docs/architecture.png" alt="Nested LWR and ARZ computational architecture" width="100%">
 </p>
 
-<p align="center"><em>ARZ-3 reuses a frozen LWR reconstruction and learns coupled density and velocity corrections subject to second-order traffic physics.</em></p>
+<p align="center"><em>ARZ reuses a frozen LWR reconstruction and learns coupled density and velocity corrections subject to second-order traffic physics.</em></p>
 
 ## Models
 
@@ -24,13 +24,28 @@ pretrained weights or generated results.
 |---|---|---|---|
 | Data-driven | Density field and speed-density law | Probe density and microscopic speed only | None |
 | LWR | Density field, speed-density law, and probe trajectories | Probe observations and trajectory consistency | First-order conservation law, flux concavity, vanishing viscosity |
-| ARZ-3 | Coupled residual corrections and monotone equilibrium speed | Frozen LWR features and the same microscopic probes | Weak mass and momentum balances, global mass, corridor and constitutive constraints |
+| ARZ | Coupled residual corrections and monotone equilibrium speed | Frozen LWR features and the same microscopic probes | Weak mass and momentum balances plus an equilibrium-law prior |
 
 The Data-driven implementation is genuinely data-only. It creates no
 collocation points, trajectory networks, PDE residuals, physics coefficients,
 or adaptive physics weights. Its optimized objective contains only the density
 and microscopic-speed data terms. The saved metrics include a machine-readable
 objective audit.
+
+The ARZ training objective is deliberately restricted to the five terms kept
+after the loss-ablation study:
+
+1. normalized probe-density mean squared error (`rho`);
+2. normalized microscopic probe-speed mean squared error (`v`);
+3. the weak prior on the monotone equilibrium curve (`veq_prior`);
+4. weak control-volume mass conservation (`weak_mass`);
+5. weak control-volume ARZ momentum conservation (`weak_mom`).
+
+The former flux proxy, trajectory-speed, induced-speed, correction-trust,
+global-mass, and corridor terms are not part of the implementation or the
+optimizer. Every ARZ result writes these five active terms to
+`metrics.json`, and the full reproduction script rejects a stale ARZ result
+whose objective audit does not match them exactly.
 
 ## Included experiment
 
@@ -55,6 +70,12 @@ wrapped position [km], time [min], local normalized density,
 microscopic speed [km/min], probe ID, unwrapped cumulative position [km]
 ```
 
+The `probe ID` column is the compact local index `0` through `6`.
+`probe_vehicles.csv` maps those indices to both the seeded selection indices
+and the original SUMO IDs (`veh.234`, `veh.259`, `veh.27`, `veh.315`,
+`veh.86`, `veh.94`, and `veh.98`). The same mapping is recorded in
+`meta.json`.
+
 `spaciotemporal.csv` and `velocity.csv` contain the dense held-out fields used
 only for evaluation and plotting. They do not enter the training objectives,
 optimizer updates, early stopping, or checkpoint selection. When reconstruction
@@ -64,19 +85,19 @@ its outputs never propagate gradients into a model.
 ## Repository layout
 
 ```text
-data/steady_ring/          one complete SUMO realization and seven probes
+data/steady_ring/          one complete SUMO realization, probe table and ID map
 docs/architecture.png     computational overview
 scripts/
   run_reproduction.py     validate, train all models, and compare them
   train_stage1.py         Data-driven or LWR training
-  train_arz3.py           nested ARZ-3 training
+  train_arz3.py           nested five-loss ARZ training
   compare_models.py       matched metrics and reconstruction figures
   validate_data.py        structural and numerical data checks
   generate_data.py        optional SUMO regeneration
 src/
   data.py                 data loading, interpolation, and metrics
   lwr.py                  Data-driven and LWR model infrastructure
-  arz3.py                 coupled ARZ-3 correction model
+  arz3.py                 coupled five-loss ARZ correction model
   baseline.py             exact frozen-LWR restoration
   reconstruction_history.py
   io_utils.py
@@ -131,7 +152,7 @@ validate data
     -> train strictly Data-driven baseline
     -> train LWR PINN
     -> freeze and restore LWR
-    -> train ARZ-3 residual correction
+    -> train five-loss ARZ residual correction
     -> compare density and velocity reconstructions
 ```
 
@@ -172,7 +193,7 @@ python scripts/train_stage1.py \
   --periodic
 ```
 
-ARZ-3 requires the freshly trained LWR directory:
+ARZ requires the freshly trained LWR directory:
 
 ```bash
 python scripts/train_arz3.py \
@@ -203,7 +224,7 @@ overwritten accidentally.
 - Training seeds are explicit and all documented commands retrain from scratch.
 - No pretrained weights are distributed.
 - The Data-driven objective is strictly supervised and audited in its metrics.
-- ARZ-3 restores an architecture-recorded, frozen LWR baseline rather than
+- ARZ restores an architecture-recorded, frozen LWR baseline rather than
   relying on an implicit in-memory state.
 - Full-plane truth is evaluation-only.
 
